@@ -16,13 +16,21 @@ import (
 // do not return an error, the configuration will be swapped in and routines
 // calling Claim will get the new configuration state/objects.
 //
-// The closer method
+// The closer method cleans up the configuration. It should be written to ignore
+// nil configurations, which is certain to be encountered on the first call to
+// loadAndTester.
 
 // LoadAndTesterType is a function called to load the configuration and test it
-// If any errors are returned, this configuration will not be swapped in. If an error is returned, CloserFunc is called to clean up after the configuration, so be sure your configuration can handle uninitialized values
+// If any errors are returned, this configuration will not be swapped in. If an
+// error is returned, CloserFunc is called to clean up after the configuration,
+// so be sure your configuration can handle uninitialized values
+// @param currentConfig is the most recent configuration. If this is the first
+//   run, this will be nil. This is useful if swapping out sockets or doing
+//   other things that require a shutdown and restart of some configuration-
+//   dependent structure
 // @return config your configuration object
 // @return err is any error encountered when loading the configuration
-type LoadAndTesterFunc func() (config interface{}, err error)
+type LoadAndTesterFunc func( currentConfig interface{} ) (config interface{}, err error)
 
 // CloserType is the function called to shutdown or release the
 // resources used by the configuration
@@ -177,13 +185,19 @@ func (c *Drain) Claim() (cc ConfigClaim, err error) {
 	if c.isStopped {
 		return ConfigClaim{}, ErrDrainAlreadyStopped
 	}
-	c.closeWg.Add(1)
-	ccv := c.versionTracking.Back().Value.(*configVersion)
-	ccv.count++
-	cc = ConfigClaim{
-		version: ccv.version,
-		config:  ccv.config,
+	cc = ConfigClaim{}
+	e := c.versionTracking.Back()
+	if e == nil {
+		// No versions configured, return a nil version
+		return cc, nil
 	}
+	// Don't track this as outstanding until a real version is established
+	c.closeWg.Add(1)
+	ccv := e.Value.(*configVersion)
+	ccv.count++
+
+	cc.version = ccv.version
+	cc.config =  ccv.config
 	return cc, nil
 }
 
@@ -197,6 +211,10 @@ func (c *Drain) Claim() (cc ConfigClaim, err error) {
 //   the ConfigClaim after calling Release on it, otherwise, those resources
 //   that it references may be closed or shutdown
 func (c *Drain) Release(cc *ConfigClaim) {
+	if cc == nil || cc.version == 0 {
+		// no version, just discard
+		return
+	}
 	c.mu.Lock()
 	e := c.findElementWithVersion(cc.version)
 	if e == nil {
@@ -261,7 +279,15 @@ func (c *Drain) findElementWithVersion(version uint64) (e *list.Element) {
 // @return err the error returned by loader and tester, or nil if any
 func (c *Drain) doLoadAndTest() (cv configVersion, err error) {
 	// perform the initial load
-	cv.config, err = c.loadAndTester()
+	cfg, err := c.Claim()
+
+	// Perform the load
+	cv.config, err = c.loadAndTester(cfg.config)
+
+	// Ensure that the configuration is released
+	c.Release(&cfg)
+
+	// LoadAndTester threw an error, close down the broken/partially working configuration
 	if err != nil {
 		c.closer(cv.config)
 		return

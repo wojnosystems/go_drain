@@ -10,11 +10,14 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 	closeCalled := false
 	loadCalled := 0
 
-	cf, err := NewDrain(func() (config interface{}, err error) {
+	cf, err := NewDrain(func(currentConfig interface{}) (config interface{}, err error) {
 		cfg := &myConfig{}
 		if loadCalled == 0 {
 			cfg.name = "chris"
 		} else {
+			if currentConfig.(*myConfig).name != "chris" {
+				t.Error(`expected currentConfig to have the old value`)
+			}
 			cfg.name = "wojno"
 		}
 		loadCalled++
