@@ -10,7 +10,7 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 	closeCalled := false
 	loadCalled := 0
 
-	cf, err := NewDrain(func(currentConfig interface{}) (config interface{}, err error) {
+	cf, err := New(func(currentConfig interface{}) (config interface{}, err error) {
 		cfg := &myConfig{}
 		if loadCalled == 0 {
 			cfg.name = "chris"
@@ -85,11 +85,11 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 		t.Error("expected the Release not to call the CloseFunc")
 	}
 
-	cf.Stop()
+	cf.StopAndJoin()
 
 	// Ensure closeFunc is called
 	if !closeCalled {
-		t.Error("expected the Stop to call the CloseFunc")
+		t.Error("expected the StopAndJoin to call the CloseFunc")
 	}
 
 }

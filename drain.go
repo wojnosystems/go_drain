@@ -7,7 +7,7 @@ import (
 )
 
 // Drain is a way to create configurations and rotate them out whenever needed.
-// The triggering mechanism to rotate a configuration is calling ReOpen. When
+// The triggering mechanism to rotate a configuration is calling ReLoad. When
 // creating a Drainer object, you pass in the loadAndTester function, which you
 // define to create and then verify your own custom configuration. Configurations
 // can be database connections or loading from files or what-have you. If you
@@ -27,10 +27,13 @@ import (
 // @param currentConfig is the most recent configuration. If this is the first
 //   run, this will be nil. This is useful if swapping out sockets or doing
 //   other things that require a shutdown and restart of some configuration-
-//   dependent structure
-// @return config your configuration object
+//   dependent structure. Passing in the current configuration allows you
+//   the ability to compare the current configuration with the new configuration
+//   so if a socket hasn't changed, you don't need to create a new http listener.
+//   Just be sure you don't close that listener on yourself ;)
+// @return config your configuration object. This will be returned to callers of "Claim"
 // @return err is any error encountered when loading the configuration
-type LoadAndTesterFunc func( currentConfig interface{} ) (config interface{}, err error)
+type LoadAndTesterFunc func(currentConfig interface{}) (config interface{}, err error)
 
 // CloserType is the function called to shutdown or release the
 // resources used by the configuration
@@ -48,12 +51,13 @@ type ConfigClaim struct {
 	config interface{}
 }
 
-// Version gets the version version of the configuration
+// Version gets the version of the configuration
 func (c ConfigClaim) Version() uint64 {
 	return c.version
 }
 
 // Config gets a pointer to the configuration
+// Callers can cast this return type to the type returned from loadAndTester
 func (c ConfigClaim) Config() interface{} {
 	return c.config
 }
@@ -67,10 +71,6 @@ func (c *ConfigClaim) Invalidate() {
 // Drainer is an interface that defines methods
 // to enable configurations to be rotated
 type Drainer interface {
-	// Stop prevents Claim calls from working and will trigger a
-	// shutdown of the configuration
-	Stop()
-
 	// Claim gets a pointer to the current configuration and the
 	// current version. This begins the process of tracking that
 	// some go routine has a copy of the configuration If you
@@ -91,6 +91,17 @@ type Drainer interface {
 	// the current version and new calls to Claim get the new
 	// configuration.
 	ReLoad() error
+
+	// Stop triggers calls to Claim to fail
+	// Stop does not wait for routines to complete and returns immediately (won't block)
+	// Stop, if called while no claims are Claimed, will clean up the configuration immediately
+	// If Claims are outstanding, the config will be cleaned up when all Claims are Released
+	Stop()
+
+	// StopAndJoin prevents Claim calls from working and will trigger a
+	// shutdown of the configuration. StopAndJoin will block until all routines
+	// have Released their Claims.
+	StopAndJoin()
 }
 
 // configVersion is the pair that holds the config and the count
@@ -149,7 +160,7 @@ type Drain struct {
 //   allow you a single place to clean up the configuration.
 // @return c the Drain object or nil, if there was an error
 // @return err any errors encountered when loading or testing the config
-func NewDrain(
+func New(
 	loadAndTest LoadAndTesterFunc,
 	closer CloserFunc,
 ) (c *Drain, err error) {
@@ -178,7 +189,7 @@ func NewDrain(
 // Claim is a routine-safe way of obtaining the configuration
 // @return cc the configuration with version number embedded for
 //  future release or an invalidated claim if Drain is already closed
-// @return err ErrDrainAlreadyStopped if Stop has been called, nil otherwise
+// @return err ErrDrainAlreadyStopped if StopAndJoin has been called, nil otherwise
 func (c *Drain) Claim() (cc ConfigClaim, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -197,7 +208,7 @@ func (c *Drain) Claim() (cc ConfigClaim, err error) {
 	ccv.count++
 
 	cc.version = ccv.version
-	cc.config =  ccv.config
+	cc.config = ccv.config
 	return cc, nil
 }
 
@@ -238,7 +249,7 @@ func (c *Drain) Release(cc *ConfigClaim) {
 		// perform cleanup
 		c.closer(cc.config)
 
-		// call invalidate before returning to prevent using old configuration data
+		// call Invalidate before returning to prevent using old configuration data
 		cc.Invalidate()
 	} else {
 		// be sure to unlock before returning
@@ -314,34 +325,58 @@ func (c *Drain) ReLoad() (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// append the new version to the back of the list, making it the latest version
+	// there will always be at least 1 version
 	ccv := c.versionTracking.Back().Value.(*configVersion)
 	cv.version = ccv.version + 1
 	c.versionTracking.PushBack(&cv)
 	return
 }
 
-// Stop prevents new calls to Claim from returning valid results
-// Stop will wait for outstanding routines that have Claims to call Release on those claims
+// Stop prevents Claim calls from returning actual values
+// It's possible to call Stop and no Claims are outstanding
+// in this case, we'll clean up the last version
 func (c *Drain) Stop() {
-	// set the state, need to lock to do this
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.isStopped = true
+	// it's possible that all threads were done but were not
+	// cleaned up as the StopAndJoin method was called after all routines
+	// have ceased requesting Claims, in this case, we need to clean up
+	e := c.versionTracking.Back()
+	if e != nil {
+		c.versionTracking.Remove(e)
+		c.mu.Unlock()
+		// unlock while calling closer, could be long
+		c.closer(e.Value.(*configVersion).config)
+	} else {
+		c.mu.Unlock()
+	}
+}
+
+// StopAndJoin prevents new calls to Claim from returning valid results
+// StopAndJoin will wait for outstanding routines that have Claims to call Release on those claims
+func (c *Drain) StopAndJoin() {
+	// set the state, need to lock to do this
 	// unlock to allow claims to be released
-	c.mu.Unlock()
+	c.Stop()
 
 	// wait for everything to be released
 	c.closeWg.Wait()
 
 	// No threads should be operating at this point
 	c.mu.Lock()
-
 	// it's possible that all threads were done but were not
-	// cleaned up as the Stop method was called after all routines
+	// cleaned up as the StopAndJoin method was called after all routines
 	// have ceased requesting Claims, in this case, we need to clean up
 	e := c.versionTracking.Back()
 	if e != nil {
-		c.closer(e.Value.(*configVersion).config)
 		c.versionTracking.Remove(e)
+		c.mu.Unlock()
+		// unlock while calling closer, could be long
+		c.closer(e.Value.(*configVersion).config)
+	} else {
+		c.mu.Unlock()
 	}
+}
+
+func (c *Drain) cleanLastVersion() {
 }
