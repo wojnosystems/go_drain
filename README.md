@@ -21,6 +21,7 @@ import (
 type myConf struct {
 	db *sql.DB
 	/// other stuff
+	tcpAddr string
 }
 
 func main() {
@@ -42,16 +43,19 @@ func main() {
         err = c.db.Ping()
         
         return c, err
-    }, func(currentConfig interface{}) {
-    	if currentConfig == nil {
-    		// ensure configuration is valid
-    		return
-    	}
-        c := currentConfig.(*myConf)
-        if c.db != nil {
-        	// if we configured a database object, close it to free up 
-        	// its resources and close the connections used.
-        	_ = c.db.Close()
+    }, func(configToClose interface{}, currentlyRunningConfig interface{}) {
+        cfgClose := configToClose.(*myConf)
+
+        // if we've gotten the currently running configuration,
+        // check to see if something changed before re-opening it
+        if currentlyRunningConfig != nil {
+        	cfgRunning := currentlyRunningConfig.(*myConf)
+        	if cfgRunning.tcpAddr != cfgClose.tcpAddr {
+        		// different address, close it, otherwise, leave it open
+        		// ... close the tcp connection ...
+        	} 
+        } else {
+        	_ = cfgClose.db.Close()
         }
     } )
     if err != nil {
@@ -92,7 +96,7 @@ func main() {
 }
 ```
 
-The above is obviously a contrived and curtailed answer, but the program initializes a reloadableConfig by creating a new Drain. New takes two parameters, a way to load and test the configuration, and a way to clean up after the configuration.
+The above is obviously a contrived and curtailed example, but the program initializes a reloadableConfig by creating a new Drain. New takes two parameters, a way to load and test the configuration, and a way to clean up after the configuration.
 
 In this example, we load the database connection settings from an environment variable. When the ```reloadableConfig.ReLoad()``` is called, it will re-read the environment variable, which may have been updated. The new value is read and the new database connection is established.
 

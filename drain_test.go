@@ -22,7 +22,7 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 		}
 		loadCalled++
 		return cfg, nil
-	}, func(config interface{}) {
+	}, func(configToClose interface{}, currentlyRunningConfig interface{}) {
 		closeCalled = true
 	})
 	if err != nil {

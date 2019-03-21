@@ -37,8 +37,16 @@ type LoadAndTesterFunc func(currentConfig interface{}) (config interface{}, err 
 
 // CloserType is the function called to shutdown or release the
 // resources used by the configuration
-// @param config is the configuration object created by LoaderType
-type CloserFunc func(config interface{})
+// @param configToClose is the configuration object created by LoaderType
+// @param currentlyRunningConfig is the configuration that is currently running.
+//   You should NOT close this one, this is provided for comparison in case you
+//   have some resource shared among all users of the configuration, such as a
+//   port/socket. Using this configuration, you can compare if there are
+//   differences in your configuration and, if not, you can retain a socket
+//   connection. If this value is nil, there is no currently active
+//   configuration or the system is closing, in which case, you should clean
+//   up all resources.
+type CloserFunc func(configToClose interface{}, currentlyRunningConfig interface{})
 
 // ConfigClaim holds the configuration claim
 // The version is used to determine which version
@@ -190,20 +198,20 @@ func New(
 // @return cc the configuration with version number embedded for
 //  future release or an invalidated claim if Drain is already closed
 // @return err ErrDrainAlreadyStopped if StopAndJoin has been called, nil otherwise
-func (c *Drain) Claim() (cc ConfigClaim, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.isStopped {
+func (d *Drain) Claim() (cc ConfigClaim, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.isStopped {
 		return ConfigClaim{}, ErrDrainAlreadyStopped
 	}
 	cc = ConfigClaim{}
-	e := c.versionTracking.Back()
+	e := d.versionTracking.Back()
 	if e == nil {
 		// No versions configured, return a nil version
 		return cc, nil
 	}
 	// Don't track this as outstanding until a real version is established
-	c.closeWg.Add(1)
+	d.closeWg.Add(1)
 	ccv := e.Value.(*configVersion)
 	ccv.count++
 
@@ -221,13 +229,13 @@ func (c *Drain) Claim() (cc ConfigClaim, err error) {
 //   be open or configured. You must never use a configuration contained within
 //   the ConfigClaim after calling Release on it, otherwise, those resources
 //   that it references may be closed or shutdown
-func (c *Drain) Release(cc *ConfigClaim) {
+func (d *Drain) Release(cc *ConfigClaim) {
 	if cc == nil || cc.version == 0 {
 		// no version, just discard
 		return
 	}
-	c.mu.Lock()
-	e := c.findElementWithVersion(cc.version)
+	d.mu.Lock()
+	e := d.findElementWithVersion(cc.version)
 	if e == nil {
 		// no record found, just return, nothing to do
 		// this can happen if Claim was called and threw an error,
@@ -236,24 +244,25 @@ func (c *Drain) Release(cc *ConfigClaim) {
 	}
 	ccv := e.Value.(*configVersion)
 	ccv.count--
-	c.closeWg.Done()
+	d.closeWg.Done()
 	// only drain if not the current count and the outstanding count is zero
 	// we do not want to clean up if we have no active threads as a new one may appear
-	if c.shouldCleanup(*ccv) {
+	if d.shouldCleanup(*ccv) {
 		// cleanup this config
-		c.versionTracking.Remove(e)
+		d.versionTracking.Remove(e)
+		currentConfig := d.latestVersion()
 
 		// unlock before allowing config to get cleaned up, as that could be along time
-		c.mu.Unlock()
+		d.mu.Unlock()
 
 		// perform cleanup
-		c.closer(cc.config)
+		d.closer(cc.config, currentConfig)
 
 		// call Invalidate before returning to prevent using old configuration data
 		cc.Invalidate()
 	} else {
 		// be sure to unlock before returning
-		c.mu.Unlock()
+		d.mu.Unlock()
 	}
 	return
 }
@@ -267,15 +276,15 @@ func (c *Drain) Release(cc *ConfigClaim) {
 // when all routines have released their claims.
 // @param cv is the configuration version to check
 // @return true if cleanup should happen, false if not
-func (c *Drain) shouldCleanup(cv configVersion) bool {
+func (d *Drain) shouldCleanup(cv configVersion) bool {
 	return cv.count == 0 &&
-		(c.isStopped || c.versionTracking.Back().Value.(*configVersion).version != cv.version)
+		(d.isStopped || d.versionTracking.Back().Value.(*configVersion).version != cv.version)
 }
 
 // findElementWithVersion takes the version and returns the element with that version
 // @return the element with the version or nil, if not found
-func (c *Drain) findElementWithVersion(version uint64) (e *list.Element) {
-	for e = c.versionTracking.Front(); e != nil; e = e.Next() {
+func (d *Drain) findElementWithVersion(version uint64) (e *list.Element) {
+	for e = d.versionTracking.Front(); e != nil; e = e.Next() {
 		if e.Value.(*configVersion).version == version {
 			return e
 		}
@@ -288,19 +297,19 @@ func (c *Drain) findElementWithVersion(version uint64) (e *list.Element) {
 // This allows the user to clean up a partially configured config.
 // @return cv is the configVersion with the configuration. It does NOT have the version field populated.
 // @return err the error returned by loader and tester, or nil if any
-func (c *Drain) doLoadAndTest() (cv configVersion, err error) {
+func (d *Drain) doLoadAndTest() (cv configVersion, err error) {
 	// perform the initial load
-	cfg, err := c.Claim()
+	cfg, err := d.Claim()
 
 	// Perform the load
-	cv.config, err = c.loadAndTester(cfg.config)
+	cv.config, err = d.loadAndTester(cfg.config)
 
 	// Ensure that the configuration is released
-	c.Release(&cfg)
+	d.Release(&cfg)
 
 	// LoadAndTester threw an error, close down the broken/partially working configuration
 	if err != nil {
-		c.closer(cv.config)
+		d.closer(cv.config, d.latestVersion())
 		return
 	}
 	return
@@ -312,71 +321,81 @@ func (c *Drain) doLoadAndTest() (cv configVersion, err error) {
 // all calls to Release are made, that version of the configuration will be
 // closed using the closer function.
 // @return err the error encountered during loader and tester
-func (c *Drain) ReLoad() (err error) {
+func (d *Drain) ReLoad() (err error) {
 	// perform the initial load
 	var cv configVersion
-	cv, err = c.doLoadAndTest()
+	cv, err = d.doLoadAndTest()
 	if err != nil {
 		// if there is an error, do NOT change the state of the Drain
 		return
 	}
 
 	// Set the config
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	// append the new version to the back of the list, making it the latest version
 	// there will always be at least 1 version
-	ccv := c.versionTracking.Back().Value.(*configVersion)
+	ccv := d.versionTracking.Back().Value.(*configVersion)
 	cv.version = ccv.version + 1
-	c.versionTracking.PushBack(&cv)
+	d.versionTracking.PushBack(&cv)
 	return
 }
 
 // Stop prevents Claim calls from returning actual values
 // It's possible to call Stop and no Claims are outstanding
 // in this case, we'll clean up the last version
-func (c *Drain) Stop() {
-	c.mu.Lock()
-	c.isStopped = true
+func (d *Drain) Stop() {
+	d.mu.Lock()
+	d.isStopped = true
 	// it's possible that all threads were done but were not
 	// cleaned up as the StopAndJoin method was called after all routines
 	// have ceased requesting Claims, in this case, we need to clean up
-	e := c.versionTracking.Back()
+	e := d.versionTracking.Back()
 	if e != nil {
-		c.versionTracking.Remove(e)
-		c.mu.Unlock()
+		d.versionTracking.Remove(e)
+		d.mu.Unlock()
 		// unlock while calling closer, could be long
-		c.closer(e.Value.(*configVersion).config)
+		d.closer(e.Value.(*configVersion).config, nil)
 	} else {
-		c.mu.Unlock()
+		d.mu.Unlock()
 	}
 }
 
 // StopAndJoin prevents new calls to Claim from returning valid results
 // StopAndJoin will wait for outstanding routines that have Claims to call Release on those claims
-func (c *Drain) StopAndJoin() {
+func (d *Drain) StopAndJoin() {
 	// set the state, need to lock to do this
 	// unlock to allow claims to be released
-	c.Stop()
+	d.Stop()
 
 	// wait for everything to be released
-	c.closeWg.Wait()
+	d.closeWg.Wait()
 
 	// No threads should be operating at this point
-	c.mu.Lock()
+	d.mu.Lock()
 	// it's possible that all threads were done but were not
 	// cleaned up as the StopAndJoin method was called after all routines
 	// have ceased requesting Claims, in this case, we need to clean up
-	e := c.versionTracking.Back()
+	e := d.versionTracking.Back()
 	if e != nil {
-		c.versionTracking.Remove(e)
-		c.mu.Unlock()
+		d.versionTracking.Remove(e)
+		d.mu.Unlock()
 		// unlock while calling closer, could be long
-		c.closer(e.Value.(*configVersion).config)
+		d.closer(e.Value.(*configVersion).config, nil)
 	} else {
-		c.mu.Unlock()
+		d.mu.Unlock()
 	}
 }
 
-func (c *Drain) cleanLastVersion() {
+// latestVersion returns the latest version or nil, if no version exists
+// assumes that the structure is locked before calling
+// @return the configuration created by loadAndTester or nil, if no version
+//   is current because it either doesn't exist or the drain is stopped
+func (d *Drain) latestVersion() interface{} {
+	currentConfigElem := d.versionTracking.Back()
+	if currentConfigElem != nil && !d.isStopped {
+		return currentConfigElem.Value.(*configVersion).config
+	} else {
+		return nil
+	}
 }
