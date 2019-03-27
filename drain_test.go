@@ -1,6 +1,8 @@
 package go_drainer
 
-import "testing"
+import (
+	"testing"
+)
 
 type myConfig struct {
 	name string
@@ -91,5 +93,10 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 	if !closeCalled {
 		t.Error("expected the StopAndJoin to call the CloseFunc")
 	}
+}
 
+func TestInterfaceImplementation(t *testing.T) {
+	var drainer Drainer
+	drainer = &Drain{}
+	_ = drainer
 }
