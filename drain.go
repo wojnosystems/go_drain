@@ -33,7 +33,7 @@ import (
 //   Just be sure you don't close that listener on yourself ;)
 // @return config your configuration object. This will be returned to callers of "Claim"
 // @return err is any error encountered when loading the configuration
-type LoadAndTesterFunc func(currentConfig interface{}) (config interface{}, err error)
+type LoadAndTesterFunc func(currentlyRunningConfig interface{}) (newConfig interface{}, err error)
 
 // CloserType is the function called to shutdown or release the
 // resources used by the configuration
@@ -334,12 +334,22 @@ func (d *Drain) ReLoad() (err error) {
 
 	// Set the config
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	// append the new version to the back of the list, making it the latest version
 	// there will always be at least 1 version
-	ccv := d.versionTracking.Back().Value.(*configVersion)
+	currentVersion := d.versionTracking.Back()
+	ccv := currentVersion.Value.(*configVersion)
 	cv.version = ccv.version + 1
 	d.versionTracking.PushBack(&cv)
+
+	// if nothing is using the config on reload, ensure it's removed
+	// do this outside of the lock as the internal structure is already set
+	if ccv.count == 0 {
+		d.versionTracking.Remove(currentVersion)
+		d.mu.Unlock()
+		d.closer(ccv.config, cv.config)
+	} else {
+		d.mu.Unlock()
+	}
 	return
 }
 

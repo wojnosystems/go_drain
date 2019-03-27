@@ -55,7 +55,7 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 
 	// Ensure close not called until release is called
 	if closeCalled {
-		t.Error("expected the ReLoad to not to call the CloseFunc until Release is called")
+		t.Error("expected the ReLoad to not to call the closeFunc until Release is called")
 	}
 
 	// Release the claim
@@ -63,7 +63,7 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 
 	// Ensure closeFunc is called
 	if !closeCalled {
-		t.Error("expected the ReLoad to call the CloseFunc, but it did not")
+		t.Error("expected the ReLoad to call the closeFunc, but it did not")
 	}
 
 	// reset the closeFunc was called checker
@@ -84,14 +84,14 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 
 	// Ensure closeFunc is NOT called
 	if closeCalled {
-		t.Error("expected the Release not to call the CloseFunc")
+		t.Error("expected the Release not to call the closeFunc")
 	}
 
 	cf.StopAndJoin()
 
 	// Ensure closeFunc is called
 	if !closeCalled {
-		t.Error("expected the StopAndJoin to call the CloseFunc")
+		t.Error("expected the StopAndJoin to call the closeFunc")
 	}
 }
 
