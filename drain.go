@@ -84,7 +84,9 @@ type Drainer interface {
 	// some go routine has a copy of the configuration If you
 	// make a call to Claim, you MUST call Release to ensure
 	// data is cleaned up
-	Claim() ConfigClaim
+	// @return ConfigClaim representing the claim with the configuration
+	// @return error if Stop has been called on the Drain
+	Claim() (ConfigClaim, error)
 
 	// Release indicates that the go routine is finished with
 	// the configuration when all claims are returned, the
