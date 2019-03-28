@@ -24,10 +24,11 @@ func TestNewAuto(t *testing.T) {
 
 	closeDidRun := 0
 
-	d, err := NewDrainWithComponents(func() interface{} {
+	d, err := NewDrainWithComponents(func() (interface{}, error) {
 		x := copyFromConfig
-		return &x
+		return &x, nil
 	}, []ComponentReloader{
+		// DATABASE
 		NewAutoComponent(func(buildingConfig interface{}) error {
 			buildingConfig.(*omniConfig).dbComp = fmt.Sprintf(`running-db-%s`, buildingConfig.(*omniConfig).dbConfig)
 			return nil
@@ -36,10 +37,12 @@ func TestNewAuto(t *testing.T) {
 			// Pretend to close by setting string to closed
 			buildingConfig.(*omniConfig).dbComp = `closed`
 		}, func(buildingConfig interface{}, currentlyRunningConfig interface{}) bool {
-			return buildingConfig.(*omniConfig).dbConfig != currentlyRunningConfig.(*omniConfig).dbConfig
+			// OK to copy if identical
+			return buildingConfig.(*omniConfig).dbConfig == currentlyRunningConfig.(*omniConfig).dbConfig
 		}, func(dst interface{}, src interface{}) {
 			dst.(*omniConfig).dbComp = src.(*omniConfig).dbComp
 		}),
+		// SERVER
 		NewAutoComponent(func(buildingConfig interface{}) error {
 			buildingConfig.(*omniConfig).serverComp = fmt.Sprintf(`running-server-%s`, buildingConfig.(*omniConfig).serverConfig)
 			return nil
@@ -48,10 +51,12 @@ func TestNewAuto(t *testing.T) {
 			// Pretend to close by setting string to closed
 			buildingConfig.(*omniConfig).serverComp = `closed`
 		}, func(buildingConfig interface{}, currentlyRunningConfig interface{}) bool {
-			return buildingConfig.(*omniConfig).serverConfig != currentlyRunningConfig.(*omniConfig).serverConfig
+			// OK to copy if identical
+			return buildingConfig.(*omniConfig).serverConfig == currentlyRunningConfig.(*omniConfig).serverConfig
 		}, func(dst interface{}, src interface{}) {
 			dst.(*omniConfig).serverComp = src.(*omniConfig).serverComp
 		}),
+		// SOMETHING ELSE THAT DOESN'T CHANGE
 		NewAutoComponent(func(buildingConfig interface{}) error {
 			buildingConfig.(*omniConfig).invariantComp = fmt.Sprintf(`running-invariant-%s`, buildingConfig.(*omniConfig).invariantConfig)
 			return nil
@@ -60,7 +65,7 @@ func TestNewAuto(t *testing.T) {
 			// Pretend to close by setting string to closed
 			buildingConfig.(*omniConfig).invariantComp = `closed`
 		}, func(buildingConfig interface{}, currentlyRunningConfig interface{}) bool {
-			return false // never say it changed, always re-use
+			return false // never say it changed, always create a new one
 		}, func(dst interface{}, src interface{}) {
 			dst.(*omniConfig).invariantComp = src.(*omniConfig).invariantComp
 		}),
@@ -91,8 +96,8 @@ func TestNewAuto(t *testing.T) {
 	// this should increment everything by 1 except for invariant, which should be copied
 	_ = d.ReLoad()
 
-	if closeDidRun != 1 {
-		t.Error(`expected close methods to be called `, 1, ` times but was `, closeDidRun)
+	if closeDidRun != 2 {
+		t.Error(`expected close methods to be called `, 2, ` times but was `, closeDidRun)
 	}
 
 	if cc, err := d.Claim(); err == nil {
@@ -103,7 +108,7 @@ func TestNewAuto(t *testing.T) {
 		if cfg.serverComp != `running-server-upd` {
 			t.Error(`serverComp configuration was not updated`)
 		}
-		if cfg.invariantComp != `running-invariant-og` {
+		if cfg.invariantComp != `running-invariant-upd` {
 			t.Error(`invariantComp configuration was updated`)
 		}
 		d.Release(&cc)
@@ -111,7 +116,7 @@ func TestNewAuto(t *testing.T) {
 
 	d.StopAndJoin()
 
-	if closeDidRun != 4 {
-		t.Error(`expected close methods to be called `, 4, ` times but was `, closeDidRun)
+	if closeDidRun != 5 {
+		t.Error(`expected close methods to be called `, 5, ` times but was `, closeDidRun)
 	}
 }

@@ -32,6 +32,10 @@ type ComponentShouldCopyFunc func(buildingConfig interface{}, currentlyRunningCo
 // @param src is where the value is coped from. This will always be non-nil
 type ComponentCopyFunc func(dst interface{}, src interface{})
 
+// ConfigurationBuilderFunc is how you tell the ComponentDrain how to build/load the base configuration
+// Once loaded, you specify a ComponentReloader for each component that needs to be independently be re-built
+type ConfigurationBuilderFunc func() (buildingConfig interface{}, err error)
+
 // ComponentReloader is the generic interface used to control how
 // items are to be loaded, unloaded, tested, swapped, and whether
 // they should be swapped
@@ -54,10 +58,19 @@ type ComponentReloader interface {
 
 // baseComponent concretion used in NewDrainWithComponents
 type baseComponent struct {
+	// openAndTestFunc function to call to create and test the new component, required
 	openAndTestFunc ComponentOpenTestFunc
-	closeFunc       ComponentCloseFunc
-	shouldCopyFunc  ComponentShouldCopyFunc
-	copyFunc        ComponentCopyFunc
+
+	// closeFunc function to call to close component, required. component may be in error or un-opened state
+	closeFunc ComponentCloseFunc
+
+	// shouldCopyFunc function to call to know if we should copy the value from a previous configuration.
+	// Set to false to not or never copy to to create a new component via openAndTestFunc.
+	// Optional. Will return false if nil
+	shouldCopyFunc ComponentShouldCopyFunc
+
+	// copyFunc function that knows how to copy components from one configuration to the next
+	copyFunc ComponentCopyFunc
 }
 
 // NewDrainWithComponents builds a Drainer object that knows how to build/reload a
@@ -65,26 +78,30 @@ type baseComponent struct {
 // the items in buildOrder and close them in REVERSE order. This also has the logic
 // to perform component copying when re-using components that don't change
 // @param configBuilder is a factory that builds new configuration objects. This
-// object should also have the data required to bootstrap components as well as
-// store those components
+//   object should also have the data required to bootstrap components as well as
+//   store those components.
 // @param buildOrder is an array of ComponentReloader objects that build a single
-// component in the configuration at a time, such as logging, then database, then
-// cache servers, then http servers, and so on
+//   component in the configuration at a time, such as logging, then database, then
+//   cache servers, then http servers, and so on
 // @return Drainer object, ready for work or nil if error
 // @return error if there was an error building any of the components the first time, nil if no errors
-func NewDrainWithComponents(configBuilder func() interface{}, buildOrder []ComponentReloader) (Drainer, error) {
+func NewDrainWithComponents(configBuilder ConfigurationBuilderFunc, buildOrder []ComponentReloader) (Drainer, error) {
 	return New(func(currentlyRunningConfig interface{}) (newConfig interface{}, err error) {
-		cfg := configBuilder()
-		for i := range buildOrder {
+		cfg, err := configBuilder()
+		if err != nil {
+			// If there was an error with the builder, halt
+			return nil, err
+		}
+		for levelsBuilt := 0; levelsBuilt < len(buildOrder); levelsBuilt++ {
 			// if already created and not changed, use that old configuration
-			if currentlyRunningConfig != nil && !buildOrder[i].ShouldCopy(cfg, currentlyRunningConfig) {
-				buildOrder[i].Copy(cfg, currentlyRunningConfig)
+			if currentlyRunningConfig != nil && buildOrder[levelsBuilt].ShouldCopy(cfg, currentlyRunningConfig) {
+				buildOrder[levelsBuilt].Copy(cfg, currentlyRunningConfig)
 			} else {
 				// if nothing running, or changed, create a new item
-				err = buildOrder[i].OpenAndTest(cfg)
+				err = buildOrder[levelsBuilt].OpenAndTest(cfg)
 				if err != nil {
 					// error encountered when creating or testing this component
-					return
+					return nil, err
 				}
 			}
 		}
@@ -92,7 +109,7 @@ func NewDrainWithComponents(configBuilder func() interface{}, buildOrder []Compo
 	}, func(configToClose interface{}, currentlyRunningConfig interface{}) {
 		for i := len(buildOrder) - 1; i >= 0; i-- {
 			// no config is currently running, always close OR the config has changed, OK to close it
-			if currentlyRunningConfig == nil || buildOrder[i].ShouldCopy(configToClose, currentlyRunningConfig) {
+			if currentlyRunningConfig == nil || !buildOrder[i].ShouldCopy(configToClose, currentlyRunningConfig) {
 				buildOrder[i].Close(configToClose)
 			}
 		}

@@ -213,9 +213,9 @@ func (d *Drain) Claim() (cc ConfigClaim, err error) {
 		return cc, nil
 	}
 	// Don't track this as outstanding until a real version is established
-	d.closeWg.Add(1)
 	ccv := e.Value.(*configVersion)
 	ccv.count++
+	d.closeWg.Add(1)
 
 	cc.version = ccv.version
 	cc.config = ccv.config
@@ -237,11 +237,16 @@ func (d *Drain) Release(cc *ConfigClaim) {
 		return
 	}
 	d.mu.Lock()
+
+	// call Invalidate before returning to prevent using old configuration data
+	defer cc.Invalidate()
+
 	e := d.findElementWithVersion(cc.version)
 	if e == nil {
 		// no record found, just return, nothing to do
 		// this can happen if Claim was called and threw an error,
 		// but they released the version anyway
+		d.mu.Unlock()
 		return
 	}
 	ccv := e.Value.(*configVersion)
@@ -252,16 +257,13 @@ func (d *Drain) Release(cc *ConfigClaim) {
 	if d.shouldCleanup(*ccv) {
 		// cleanup this config
 		d.versionTracking.Remove(e)
-		currentConfig := d.latestVersion()
+		latestVersion := d.latestVersion()
 
 		// unlock before allowing config to get cleaned up, as that could be along time
 		d.mu.Unlock()
 
 		// perform cleanup
-		d.closer(cc.config, currentConfig)
-
-		// call Invalidate before returning to prevent using old configuration data
-		cc.Invalidate()
+		d.closer(cc.config, latestVersion)
 	} else {
 		// be sure to unlock before returning
 		d.mu.Unlock()
@@ -297,17 +299,22 @@ func (d *Drain) findElementWithVersion(version uint64) (e *list.Element) {
 // doLoadAndTest calls loader and tester, returning any errors encountered.
 // If an error is returned, closer is called on the config returned by loadAndTester
 // This allows the user to clean up a partially configured config.
+//
+// Assumes that the d.mu is not locked
+//
 // @return cv is the configVersion with the configuration. It does NOT have the version field populated.
 // @return err the error returned by loader and tester, or nil if any
 func (d *Drain) doLoadAndTest() (cv configVersion, err error) {
 	// perform the initial load
-	cfg, err := d.Claim()
+	if cfg, claimErr := d.Claim(); claimErr != nil {
+		return configVersion{}, claimErr
+	} else {
+		// Perform the load
+		cv.config, err = d.loadAndTester(cfg.config)
 
-	// Perform the load
-	cv.config, err = d.loadAndTester(cfg.config)
-
-	// Ensure that the configuration is released
-	d.Release(&cfg)
+		// Ensure that the configuration is released
+		d.Release(&cfg)
+	}
 
 	// LoadAndTester threw an error, close down the broken/partially working configuration
 	if err != nil {
@@ -336,15 +343,15 @@ func (d *Drain) ReLoad() (err error) {
 	d.mu.Lock()
 	// append the new version to the back of the list, making it the latest version
 	// there will always be at least 1 version
-	currentVersion := d.versionTracking.Back()
-	ccv := currentVersion.Value.(*configVersion)
+	oldCurrentVersion := d.versionTracking.Back()
+	ccv := oldCurrentVersion.Value.(*configVersion)
 	cv.version = ccv.version + 1
 	d.versionTracking.PushBack(&cv)
 
 	// if nothing is using the config on reload, ensure it's removed
 	// do this outside of the lock as the internal structure is already set
-	if ccv.count == 0 {
-		d.versionTracking.Remove(currentVersion)
+	if d.shouldCleanup(*oldCurrentVersion.Value.(*configVersion)) {
+		d.versionTracking.Remove(oldCurrentVersion)
 		d.mu.Unlock()
 		d.closer(ccv.config, cv.config)
 	} else {
@@ -363,7 +370,8 @@ func (d *Drain) Stop() {
 	// cleaned up as the StopAndJoin method was called after all routines
 	// have ceased requesting Claims, in this case, we need to clean up
 	e := d.versionTracking.Back()
-	if e != nil {
+	if e != nil && d.shouldCleanup(*e.Value.(*configVersion)) {
+		// nothing using it
 		d.versionTracking.Remove(e)
 		d.mu.Unlock()
 		// unlock while calling closer, could be long
@@ -389,7 +397,7 @@ func (d *Drain) StopAndJoin() {
 	// cleaned up as the StopAndJoin method was called after all routines
 	// have ceased requesting Claims, in this case, we need to clean up
 	e := d.versionTracking.Back()
-	if e != nil {
+	if e != nil && d.shouldCleanup(*e.Value.(*configVersion)) {
 		d.versionTracking.Remove(e)
 		d.mu.Unlock()
 		// unlock while calling closer, could be long
