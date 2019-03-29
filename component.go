@@ -1,4 +1,4 @@
-package go_drainer
+package go_drain
 
 // ComponentOpenTestFunc creates the object from the configuration
 // @param buildingConfig is the configuration to use when creating

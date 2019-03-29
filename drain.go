@@ -1,4 +1,4 @@
-package go_drainer
+package go_drain
 
 import (
 	"container/list"
@@ -94,6 +94,23 @@ type Drainer interface {
 	// configuration, or the Drain is stopped
 	// When released, the ConfigClaim is zero'ed out
 	Release(*ConfigClaim)
+
+	// ClaimRelease is a convenience method for Claim + Release
+	// The method is given the configuration and called if there is a
+	// current configuration available, if not, it does not call the
+	// method and simply returns the ErrDrainAlreadyStopped.
+	// You must NOT copy the configuration out of the scope of the
+	// closure. After the closure completes, you are no longer
+	// guaranteed that the configuration returned will still be valid.
+	// However, while you're executing within closure,
+	// currentlyRunningConfig will remain valid.
+	// @param currentlyRunningConfig is a pointer that you need to
+	//   cast to the configuration you created in your loadAndTestFuncs.
+	//   This value is GUARANTEED to never be nil.
+	// @return nil if closure was executed, ErrDrainAlreadyStopped is
+	//   returned if there is no valid configuration because the Drain
+	//   has been stopped.
+	ClaimRelease(closure func(currentlyRunningConfig interface{})) error
 
 	// ReLoad triggers re-loading of the configuration. If there's
 	// an error, the new config is discarded and the swap is not
@@ -269,6 +286,20 @@ func (d *Drain) Release(cc *ConfigClaim) {
 		d.mu.Unlock()
 	}
 	return
+}
+
+// ClaimRelease is a convenience method for calling Claim and Release safely in a block
+// I'm using defer here to perform the Release as it's possible when testing to recover
+// from panics that will by-pass the Release call UNLESS using defer. This can cause
+// deadlocks while testing.
+func (d *Drain) ClaimRelease(closure func(currentlyRunningConfig interface{})) error {
+	if cc, err := d.Claim(); err == nil {
+		defer d.Release(&cc)
+		closure(cc.Config())
+		return nil
+	} else {
+		return err
+	}
 }
 
 // shouldCleanup is true if this configuration should be closed/cleaned up

@@ -1,4 +1,4 @@
-package go_drainer
+package go_drain
 
 import (
 	"testing"
@@ -87,11 +87,26 @@ func TestConfigLifeCycle_Claim(t *testing.T) {
 		t.Error("expected the Release not to call the closeFunc")
 	}
 
+	// need to test the ClaimRelease
+	if nil != cf.ClaimRelease(func(currentlyRunningConfig interface{}) {
+		claimReleaseConfig := currentlyRunningConfig.(*myConfig)
+		if claimReleaseConfig.name != "wojno" {
+			t.Errorf(`expected ClaimRelase to get the current name of "wojno" but got "%s"`, claimReleaseConfig.name)
+		}
+	}) {
+		t.Error(`expected ClaimRelease to actually return a value`)
+	}
+
 	cf.StopAndJoin()
 
 	// Ensure closeFunc is called
 	if !closeCalled {
 		t.Error("expected the StopAndJoin to call the closeFunc")
+	}
+
+	if nil == cf.ClaimRelease(func(currentlyRunningConfig interface{}) {
+	}) {
+		t.Error(`Expected ClaimRelease to return error`)
 	}
 }
 

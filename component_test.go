@@ -1,4 +1,4 @@
-package go_drainer
+package go_drain
 
 import (
 	"fmt"
