@@ -349,8 +349,10 @@ func (d *Drain) doLoadAndTest() (cv configVersion, err error) {
 
 	// LoadAndTester threw an error, close down the broken/partially working configuration
 	if err != nil {
-		d.closer(cv.config, d.latestVersion())
-		return
+		// if the configuration is nil, there is nothing to close
+		if cv.config != nil {
+			d.closer(cv.config, d.latestVersion())
+		}
 	}
 	return
 }
