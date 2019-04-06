@@ -118,7 +118,7 @@ func NewDrainWithComponents(configBuilder ConfigurationBuilderFunc, buildOrder [
 
 // NewAutoComponent creates a new component factory that allows the component-drain to build configs without much intervention on your behalf
 // @param openAndTestFunc is a function that builds a component, without regard if it needs to be Copied or closed first. Leave that to the AutoDrain
-// @param closeFunc is a function that shuts-down and/or releases the resources for the component
+// @param closeFunc is a function that shuts-down and/or releases the resources for the component. Pass in nil to never close
 // @param shouldCopyFunc is a function that indicates with true if the component should be re-used instead of closing and opening it again. If nil, will act as though you used a function that always returns false. This method is not called if copyFunc is nil.
 // @param copyFunc is a function that copies the configuration from the currently running configuration to the new configuration, in lieu of closing and re-opening it. Pass in nil to never copy and always create new items
 func NewAutoComponent(
@@ -141,7 +141,9 @@ func (a *baseComponent) OpenAndTest(buildingConfig interface{}) error {
 
 // Close is a pass-through to the function in the object
 func (a *baseComponent) Close(buildingConfig interface{}) {
-	a.closeFunc(buildingConfig)
+	if a.closeFunc != nil {
+		a.closeFunc(buildingConfig)
+	}
 }
 
 // ShouldCopy is a pass through unless the function is nil or if the CopyFunc is nil. If either are nil, then
