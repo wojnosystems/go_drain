@@ -10,12 +10,12 @@ When it's time to reload the config, call ReLoad. If the configuration loads suc
 package main
 
 import (
-    "database/sql"
-    _ "github.com/go-sql-driver/mysql"
-    "github.com/wojnosystems/go_drain"
-    "log"
-    "net/http"
-    "os"
+	"database/sql"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/wojnosystems/go_drain"
+	"log"
+	"net/http"
+	"os"
 )
 
 type myConf struct {
@@ -26,73 +26,73 @@ type myConf struct {
 
 func main() {
 	// create a new reloadableConfig
-    reloadableConfig, err := go_drain.New( func(currentConfig interface{}) (config interface{}, err error) {
-        // ignoring currentConfig for this example
-        c := &myConf{}
-        // reading db settings from ENV, obviously, don't really 
-        // do this, this is just for demonstration purposes.
-        // you can easily trigger a file read here to pull in settings from a file
-        c.db, err = sql.Open("mysql", os.Getenv("DB_CONNECTION_STRING"))
-        if err != nil {
-            return nil, err
-        }
-        
-        // BEGIN CONFIG TESTS!
-        
-        // check that database is alive!
-        err = c.db.Ping()
-        
-        return c, err
-    }, func(configToClose interface{}, currentlyRunningConfig interface{}) {
-        cfgClose := configToClose.(*myConf)
+	reloadableConfig, err := go_drain.New( func(currentConfig interface{}) (config interface{}, err error) {
+		// ignoring currentConfig for this example
+		c := &myConf{}
+		// reading db settings from ENV, obviously, don't really
+		// do this, this is just for demonstration purposes.
+		// you can easily trigger a file read here to pull in settings from a file
+		c.db, err = sql.Open("mysql", os.Getenv("DB_CONNECTION_STRING"))
+		if err != nil {
+			return nil, err
+		}
 
-        // if we've gotten the currently running configuration,
-        // check to see if something changed before re-opening it
-        if currentlyRunningConfig != nil {
-        	cfgRunning := currentlyRunningConfig.(*myConf)
-        	if cfgRunning.tcpAddr != cfgClose.tcpAddr {
-        		// different address, close it, otherwise, leave it open
-        		// ... close the tcp connection ...
-        	} 
-        } else {
-        	_ = cfgClose.db.Close()
-        }
-    } )
-    if err != nil {
-    	log.Fatal(`failed to initialize the settings!`)
-    }
-    
-    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        cfg, err := reloadableConfig.Claim()
-        if err != nil {
-        	// config is invalid, called Claim() after Stop()
-        	// you should really shutdown your http server BEFORE you call Stop()
-        	// this gives routines a chance to complete their work before returning
-        	// control to the routine that called Stop
-        	return
-        }
-        c := cfg.Config().(*myConf)
-        
-        // do stuff with configuration, use your imagination here.
-        _, _ = c.db.Exec(`...DO THING...`)
-        
-        // when done, release
-        reloadableConfig.Release(&cfg)
-    })
-    go func() {
-        _ = http.ListenAndServe(":8080", nil )
-    }()
-    
-    // time goes by...
-    // some signal for SIGHUP comes in, time to reload the config!
-    // this will open a new connection to the database after reading
-    // the environment variable
-    _ = reloadableConfig.ReLoad()
-    
-    // Wait to exit here say, on SIGINT or something
-    
-    // Stop will wait until all configurations are Released. New calls to Claim return an error and no valid configuration
-    reloadableConfig.StopAndJoin()
+		// BEGIN CONFIG TESTS!
+
+		// check that database is alive!
+		err = c.db.Ping()
+
+		return c, err
+	}, func(configToClose interface{}, currentlyRunningConfig interface{}) {
+		cfgClose := configToClose.(*myConf)
+
+		// if we've gotten the currently running configuration,
+		// check to see if something changed before re-opening it
+		if currentlyRunningConfig != nil {
+			cfgRunning := currentlyRunningConfig.(*myConf)
+			if cfgRunning.tcpAddr != cfgClose.tcpAddr {
+				// different address, close it, otherwise, leave it open
+				// ... close the tcp connection ...
+			}
+		} else {
+			_ = cfgClose.db.Close()
+		}
+	} )
+	if err != nil {
+		log.Fatal(`failed to initialize the settings!`)
+	}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		cfg, err := reloadableConfig.Claim()
+		if err != nil {
+			// config is invalid, called Claim() after Stop()
+			// you should really shutdown your http server BEFORE you call Stop()
+			// this gives routines a chance to complete their work before returning
+			// control to the routine that called Stop
+			return
+		}
+		c := cfg.Config().(*myConf)
+
+		// do stuff with configuration, use your imagination here.
+		_, _ = c.db.Exec(`...DO THING...`)
+
+		// when done, release
+		reloadableConfig.Release(&cfg)
+	})
+	go func() {
+		_ = http.ListenAndServe(":8080", nil )
+	}()
+
+	// time goes by...
+	// some signal for SIGHUP comes in, time to reload the config!
+	// this will open a new connection to the database after reading
+	// the environment variable
+	_ = reloadableConfig.ReLoad()
+
+	// Wait to exit here say, on SIGINT or something
+
+	// Stop will wait until all configurations are Released. New calls to Claim return an error and no valid configuration
+	reloadableConfig.StopAndJoin()
 }
 ```
 
